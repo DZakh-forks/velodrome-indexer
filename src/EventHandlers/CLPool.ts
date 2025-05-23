@@ -21,7 +21,11 @@ import { updateLiquidityPoolAggregator } from "../Aggregators/LiquidityPoolAggre
 import { normalizeTokenAmountTo1e18 } from "../Helpers";
 import { abs, multiplyBase1e18 } from "../Maths";
 import { fetchPoolLoaderData } from "../Pools/common";
-import { refreshTokenPrice } from "../PriceOracle";
+import {
+  getTokenPriceData,
+  refreshTokenPrice,
+  TokenPriceData,
+} from "../PriceOracle";
 
 /**
  * Updates the fee-related metrics for a Concentrated Liquidity Pool.
@@ -506,6 +510,7 @@ type SwapEntityData = {
 
 const updateToken0SwapData = async (
   data: SwapEntityData,
+  tokenPriceData: TokenPriceData | undefined,
   event: CLPool_Swap_event,
   context: handlerContext,
 ) => {
@@ -528,6 +533,7 @@ const updateToken0SwapData = async (
       event.block.number,
       event.block.timestamp,
       event.chainId,
+      tokenPriceData,
       context,
     );
   } catch (error) {
@@ -560,8 +566,10 @@ const updateToken0SwapData = async (
     tokenUpdateData,
   };
 };
+
 const updateToken1SwapData = async (
   data: SwapEntityData,
+  tokenPriceData: TokenPriceData | undefined,
   event: CLPool_Swap_event,
   context: handlerContext,
 ) => {
@@ -584,6 +592,7 @@ const updateToken1SwapData = async (
       event.block.number,
       event.block.timestamp,
       event.chainId,
+      tokenPriceData,
       context,
     );
   } catch (error) {
@@ -649,9 +658,37 @@ const updateLiquidityPoolAggregatorDiffSwap = (
 
 CLPool.Swap.handlerWithLoader({
   loader: async ({ event, context }) => {
-    return fetchPoolLoaderData(event.srcAddress, context, event.chainId);
+    const poolData = await fetchPoolLoaderData(
+      event.srcAddress,
+      context,
+      event.chainId,
+    );
+    let token0PriceData = undefined;
+    let token1PriceData = undefined;
+    if (poolData._type === "success") {
+      [token0PriceData, token1PriceData] = await Promise.all([
+        context.effect(getTokenPriceData, {
+          tokenAddress: poolData.token0Instance.address,
+          blockNumber: event.block.number,
+          chainId: event.chainId,
+        }),
+        context.effect(getTokenPriceData, {
+          tokenAddress: poolData.token1Instance.address,
+          blockNumber: event.block.number,
+          chainId: event.chainId,
+        }),
+      ]);
+    }
+
+    return {
+      poolData,
+      token0PriceData,
+      token1PriceData,
+    };
   },
   handler: async ({ event, context, loaderReturn }) => {
+    const { poolData, token0PriceData, token1PriceData } = loaderReturn;
+
     const blockDatetime = new Date(event.block.timestamp * 1000);
     const entity: CLPool_Swap = {
       id: `${event.chainId}_${event.block.number}_${event.logIndex}`,
@@ -684,23 +721,25 @@ CLPool.Swap.handlerWithLoader({
 
     const liquidityPoolAggregatorDiff: Partial<LiquidityPoolAggregator> = {};
 
-    switch (loaderReturn._type) {
+    switch (poolData._type) {
       case "success": {
         let successSwapEntityData: SwapEntityData = {
-          liquidityPoolAggregator: loaderReturn.liquidityPoolAggregator,
-          token0Instance: loaderReturn.token0Instance,
-          token1Instance: loaderReturn.token1Instance,
+          liquidityPoolAggregator: poolData.liquidityPoolAggregator,
+          token0Instance: poolData.token0Instance,
+          token1Instance: poolData.token1Instance,
           tokenUpdateData,
           liquidityPoolAggregatorDiff,
         };
 
         successSwapEntityData = await updateToken0SwapData(
           successSwapEntityData,
+          token0PriceData,
           event,
           context,
         );
         successSwapEntityData = await updateToken1SwapData(
           successSwapEntityData,
+          token1PriceData,
           event,
           context,
         );
@@ -735,14 +774,14 @@ CLPool.Swap.handlerWithLoader({
         return;
       }
       case "TokenNotFoundError":
-        context.log.error(loaderReturn.message);
+        context.log.error(poolData.message);
         return;
       case "LiquidityPoolAggregatorNotFoundError":
-        context.log.error(loaderReturn.message);
+        context.log.error(poolData.message);
         return;
 
       default: {
-        const _exhaustiveCheck: never = loaderReturn;
+        const _exhaustiveCheck: never = poolData;
         return _exhaustiveCheck;
       }
     }

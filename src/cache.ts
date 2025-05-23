@@ -1,4 +1,4 @@
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { CacheCategory } from "./Constants";
@@ -17,7 +17,7 @@ export type ShapeToken = Shape &
 
 // biome-ignore lint/complexity/noStaticOnlyClass:
 export class Cache {
-  static init<C = CacheCategory>(
+  static async init<C = CacheCategory>(
     category: C,
     chainId: number | string | bigint,
   ) {
@@ -33,6 +33,7 @@ export class Cache {
           ? ShapeBribeToPool
           : ShapeRoot;
     const entry = new Entry<S>(`${category}-${chainId.toString()}`);
+    await entry.init();
     return entry;
   }
 }
@@ -49,9 +50,6 @@ export class Entry<T extends Shape> {
   constructor(key: string) {
     this.key = key;
     this.file = Entry.resolve(key);
-
-    this.preflight();
-    this.load();
   }
 
   public read(key: string) {
@@ -59,9 +57,9 @@ export class Entry<T extends Shape> {
     return memory[key] as T[typeof key];
   }
 
-  public load() {
+  public async load() {
     try {
-      const data = fs.readFileSync(this.file, Entry.encoding);
+      const data = await fs.readFile(this.file, Entry.encoding);
       this.memory = JSON.parse(data) as T;
     } catch (error) {
       console.error(error);
@@ -86,22 +84,44 @@ export class Entry<T extends Shape> {
     this.publish();
   }
 
-  private preflight() {
-    /** Ensure cache folder exists */
-    if (!fs.existsSync(Entry.folder)) {
-      fs.mkdirSync(Entry.folder);
+  public async init() {
+    await this.preflight();
+    await this.load();
+  }
+
+  private async preflight() {
+    // Ensure cache folder exists
+    try {
+      await fs.mkdir(Entry.folder, { recursive: true });
+    } catch (err) {
+      console.error("Failed to create cache folder:", err);
+      // Optionally rethrow or handle as needed
     }
-    if (!fs.existsSync(this.file)) {
-      fs.writeFileSync(this.file, JSON.stringify({}));
+
+    // Ensure cache file exists
+    try {
+      await fs.access(this.file);
+    } catch {
+      // File does not exist, create it
+      try {
+        await fs.writeFile(this.file, JSON.stringify({}), { flag: "wx" });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+          console.error("Failed to create cache file:", err);
+        }
+        // If EEXIST, another process created it in the meantime; that's fine
+      }
     }
   }
 
-  private publish() {
-    const prepared = JSON.stringify(this.memory, (key, value) =>
-      typeof value === "bigint" ? value.toString() : value,
+  private async publish() {
+    const prepared = JSON.stringify(
+      this.memory,
+      (_, value) => (typeof value === "bigint" ? value.toString() : value),
+      2,
     );
     try {
-      fs.writeFileSync(this.file, prepared);
+      await fs.writeFile(this.file, prepared);
     } catch (error) {
       console.error(error);
     }
