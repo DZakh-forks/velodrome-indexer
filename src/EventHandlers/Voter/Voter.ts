@@ -98,7 +98,7 @@ Voter.GaugeCreated.handler(async ({ event, context }) => {
 
 Voter.DistributeReward.handlerWithLoader({
   loader: async ({ event, context }) => {
-    const poolAddress = getPoolAddressByGaugeAddress(
+    const poolAddress = await getPoolAddressByGaugeAddress(
       event.chainId,
       event.params.gauge,
     );

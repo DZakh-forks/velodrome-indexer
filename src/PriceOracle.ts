@@ -1,31 +1,29 @@
-import { createHash } from "node:crypto";
+import { experimental_createEffect, S } from "envio";
 import SpotPriceAggregatorABI from "../abis/SpotPriceAggregator.json";
 import PriceOracleABI from "../abis/VeloPriceOracleABI.json";
 import {
   CHAIN_CONSTANTS,
-  CacheCategory,
   TokenIdByBlock,
   TokenIdByChain,
   toChecksumAddress,
 } from "./Constants";
 import { PriceOracleType, TEN_TO_THE_18_BI } from "./Constants";
 import { getErc20TokenDetails } from "./Erc20";
-import { Cache } from "./cache";
-import type {
-  Token,
-  TokenPriceSnapshot,
-  handlerContext,
-} from "./src/Types.gen";
-export interface TokenPriceData {
-  pricePerUSDNew: bigint;
-  decimals: bigint;
-}
+
+import type { Token, TokenPriceSnapshot, HandlerContext } from "generated";
+
+const tokenPriceDataSchema = S.schema({
+  pricePerUSDNew: S.bigint,
+  decimals: S.bigint,
+});
+
+export type TokenPriceData = S.Output<typeof tokenPriceDataSchema>;
 
 export async function createTokenEntity(
   tokenAddress: string,
   chainId: number,
   blockNumber: number,
-  context: handlerContext,
+  context: HandlerContext,
 ) {
   const blockDatetime = new Date(blockNumber * 1000);
   const tokenDetails = await getErc20TokenDetails(tokenAddress, chainId);
@@ -59,7 +57,8 @@ const ONE_HOUR_MS = 60 * 60 * 1000; // 1 hour in milliseconds
  * @param {number} blockNumber - The block number to fetch price data from
  * @param {number} blockTimestamp - The timestamp of the block in seconds
  * @param {number} chainId - The chain ID where the token exists
- * @param {any} context - The database context for updating entities
+ * @param {TokenPriceData | undefined} tokenPriceDataFromLoader - The token price data from the loader
+ * @param {HandlerContext} context - The database context for updating entities
  * @returns {Promise<Token>} The updated token entity
  */
 export async function refreshTokenPrice(
@@ -67,7 +66,8 @@ export async function refreshTokenPrice(
   blockNumber: number,
   blockTimestamp: number,
   chainId: number,
-  context: handlerContext,
+  tokenPriceDataFromLoader: TokenPriceData | undefined,
+  context: HandlerContext,
 ): Promise<Token> {
   const blockTimestampMs = blockTimestamp * 1000;
 
@@ -75,11 +75,13 @@ export async function refreshTokenPrice(
     return token;
   }
 
-  const tokenPriceData = await getTokenPriceData(
-    token.address,
-    blockNumber,
-    chainId,
-  );
+  const tokenPriceData =
+    tokenPriceDataFromLoader ||
+    (await context.effect(getTokenPriceData, {
+      tokenAddress: token.address,
+      blockNumber,
+      chainId,
+    }));
   const currentPrice = tokenPriceData.pricePerUSDNew;
   const updatedToken: Token = {
     ...token,
@@ -111,78 +113,93 @@ export async function refreshTokenPrice(
  * 2. Fetching price data from the price oracle
  * 3. Converting the price to the appropriate format
  *
+ * It uses Envio Effect API to maximize performance and type safety.
+ * https://docs.envio.dev/docs/HyperIndex/loaders#effect-api-experimental
+ *
  * @param {string} tokenAddress - The token's contract address
  * @param {number} blockNumber - The block number to fetch price data from
  * @param {number} chainId - The chain ID where the token exists
  * @returns {Promise<TokenPriceData>} Object containing the token's price and decimals
  * @throws {Error} If there's an error fetching the token price
  */
-export async function getTokenPriceData(
-  tokenAddress: string,
-  blockNumber: number,
-  chainId: number,
-): Promise<TokenPriceData> {
-  const tokenDetails = await getErc20TokenDetails(tokenAddress, chainId);
+export const getTokenPriceData = experimental_createEffect(
+  {
+    name: "getTokenPriceData",
+    input: {
+      tokenAddress: S.string,
+      blockNumber: S.number,
+      chainId: S.number,
+    },
+    output: tokenPriceDataSchema,
+  },
+  async ({ input }) => {
+    const { tokenAddress, blockNumber, chainId } = input;
 
-  const WETH_ADDRESS = CHAIN_CONSTANTS[chainId].weth;
-  const USDC_ADDRESS = CHAIN_CONSTANTS[chainId].usdc;
-  const SYSTEM_TOKEN_ADDRESS =
-    CHAIN_CONSTANTS[chainId].rewardToken(blockNumber);
+    const tokenDetails = await getErc20TokenDetails(
+      input.tokenAddress,
+      input.chainId,
+    );
 
-  const USDTokenDetails = await getErc20TokenDetails(USDC_ADDRESS, chainId);
+    const WETH_ADDRESS = CHAIN_CONSTANTS[chainId].weth;
+    const USDC_ADDRESS = CHAIN_CONSTANTS[chainId].usdc;
+    const SYSTEM_TOKEN_ADDRESS =
+      CHAIN_CONSTANTS[chainId].rewardToken(blockNumber);
 
-  if (tokenAddress === USDC_ADDRESS) {
-    return {
-      pricePerUSDNew: TEN_TO_THE_18_BI,
-      decimals: BigInt(tokenDetails.decimals),
-    };
-  }
+    const USDTokenDetails = await getErc20TokenDetails(USDC_ADDRESS, chainId);
 
-  const connectors = CHAIN_CONSTANTS[chainId].oracle.priceConnectors
-    .filter((connector) => connector.createdBlock <= blockNumber)
-    .map((connector) => connector.address)
-    .filter((connector) => connector !== tokenAddress)
-    .filter((connector) => connector !== WETH_ADDRESS)
-    .filter((connector) => connector !== USDC_ADDRESS)
-    .filter((connector) => connector !== SYSTEM_TOKEN_ADDRESS);
-
-  let pricePerUSDNew = 0n;
-  const decimals: bigint = BigInt(tokenDetails.decimals);
-
-  const ORACLE_DEPLOYED =
-    CHAIN_CONSTANTS[chainId].oracle.startBlock <= blockNumber;
-
-  if (ORACLE_DEPLOYED) {
-    try {
-      const priceData = await read_prices(
-        tokenAddress,
-        USDC_ADDRESS,
-        SYSTEM_TOKEN_ADDRESS,
-        WETH_ADDRESS,
-        connectors,
-        chainId,
-        blockNumber,
-      );
-
-      if (priceData.priceOracleType === PriceOracleType.V3) {
-        // Convert to 18 decimals.
-        pricePerUSDNew =
-          (priceData.pricePerUSDNew * 10n ** BigInt(tokenDetails.decimals)) /
-          10n ** BigInt(USDTokenDetails.decimals);
-      } else {
-        pricePerUSDNew = priceData.pricePerUSDNew;
-      }
-    } catch (error) {
-      console.error(
-        `Error fetching price data for ${tokenAddress} on chain ${chainId} at block ${blockNumber}:`,
-        error,
-      );
-      return { pricePerUSDNew: 0n, decimals: BigInt(tokenDetails.decimals) };
+    if (tokenAddress === USDC_ADDRESS) {
+      return {
+        pricePerUSDNew: TEN_TO_THE_18_BI,
+        decimals: BigInt(tokenDetails.decimals),
+      };
     }
-  }
 
-  return { pricePerUSDNew, decimals };
-}
+    const connectors = CHAIN_CONSTANTS[chainId].oracle.priceConnectors
+      .filter((connector) => connector.createdBlock <= blockNumber)
+      .map((connector) => connector.address)
+      .filter((connector) => connector !== tokenAddress)
+      .filter((connector) => connector !== WETH_ADDRESS)
+      .filter((connector) => connector !== USDC_ADDRESS)
+      .filter((connector) => connector !== SYSTEM_TOKEN_ADDRESS);
+
+    let pricePerUSDNew = 0n;
+    const decimals: bigint = BigInt(tokenDetails.decimals);
+
+    const ORACLE_DEPLOYED =
+      CHAIN_CONSTANTS[chainId].oracle.startBlock <= blockNumber;
+
+    if (ORACLE_DEPLOYED) {
+      try {
+        const priceData = await read_prices(
+          tokenAddress,
+          USDC_ADDRESS,
+          SYSTEM_TOKEN_ADDRESS,
+          WETH_ADDRESS,
+          connectors,
+          chainId,
+          blockNumber,
+        );
+
+        if (priceData.priceOracleType === PriceOracleType.V3) {
+          // Convert to 18 decimals.
+          pricePerUSDNew =
+            (priceData.pricePerUSDNew * 10n ** BigInt(tokenDetails.decimals)) /
+            10n ** BigInt(USDTokenDetails.decimals);
+        } else {
+          pricePerUSDNew = priceData.pricePerUSDNew;
+        }
+      } catch (error) {
+        console.error(
+          `Error fetching price data for ${tokenAddress} on chain ${chainId} at block ${blockNumber}:`,
+          error,
+        );
+        return { pricePerUSDNew: 0n, decimals: BigInt(tokenDetails.decimals) };
+      }
+    }
+
+    return { pricePerUSDNew, decimals };
+  },
+);
 
 /**
  * Reads the prices of specified tokens from a price oracle contract.

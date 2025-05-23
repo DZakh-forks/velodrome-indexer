@@ -197,6 +197,7 @@ Pool.Swap.handlerWithLoader({
             event.block.number,
             event.block.timestamp,
             event.chainId,
+            undefined,
             context,
           );
         } catch (error) {
@@ -221,6 +222,7 @@ Pool.Swap.handlerWithLoader({
             event.block.number,
             event.block.timestamp,
             event.chainId,
+            undefined,
             context,
           );
         } catch (error) {

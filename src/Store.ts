@@ -17,12 +17,17 @@ export const poolLookupStoreManager = () => {
   };
   const cacheMap = new Map<string | number | bigint, lookups>();
 
-  const getCache = (chainId: string | number | bigint): lookups => {
+  const getCache = async (
+    chainId: string | number | bigint,
+  ): Promise<lookups> => {
     const cache = cacheMap.get(chainId);
     if (!cache) {
       const newCache = {
-        gaugeToPoolCache: Cache.init(CacheCategory.GuageToPool, chainId),
-        bribeVotingToPoolCache: Cache.init(CacheCategory.BribeToPool, chainId),
+        gaugeToPoolCache: await Cache.init(CacheCategory.GuageToPool, chainId),
+        bribeVotingToPoolCache: await Cache.init(
+          CacheCategory.BribeToPool,
+          chainId,
+        ),
       };
       cacheMap.set(chainId, newCache);
       return newCache;
@@ -30,11 +35,12 @@ export const poolLookupStoreManager = () => {
     return cache;
   };
 
-  const addRewardAddressDetails = (
+  const addRewardAddressDetails = async (
     chainId: string | number | bigint,
     details: poolRewardAddressMapping,
   ) => {
-    const { gaugeToPoolCache, bribeVotingToPoolCache } = getCache(chainId);
+    const { gaugeToPoolCache, bribeVotingToPoolCache } =
+      await getCache(chainId);
     gaugeToPoolCache.add({
       [details.gaugeAddress]: {
         poolAddress: details.poolAddress,
@@ -47,20 +53,20 @@ export const poolLookupStoreManager = () => {
     });
   };
 
-  const getPoolAddressByGaugeAddress = (
+  const getPoolAddressByGaugeAddress = async (
     chainId: string | number | bigint,
     gaugeAddress: string,
-  ): string | undefined => {
-    const { gaugeToPoolCache } = getCache(chainId);
+  ): Promise<string | undefined> => {
+    const { gaugeToPoolCache } = await getCache(chainId);
     const result = gaugeToPoolCache.read(gaugeAddress);
     return result ? result.poolAddress : undefined;
   };
 
-  const getPoolAddressByBribeVotingRewardAddress = (
+  const getPoolAddressByBribeVotingRewardAddress = async (
     chainId: string | number | bigint,
     bribeVotingRewardAddress: string,
-  ): string | undefined => {
-    const { bribeVotingToPoolCache } = getCache(chainId);
+  ): Promise<string | undefined> => {
+    const { bribeVotingToPoolCache } = await getCache(chainId);
     const result = bribeVotingToPoolCache.read(bribeVotingRewardAddress);
     return result ? result.poolAddress : undefined;
   };

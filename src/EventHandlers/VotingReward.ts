@@ -19,7 +19,7 @@ const { getPoolAddressByBribeVotingRewardAddress } = poolLookupStoreManager();
 
 VotingReward.NotifyReward.handlerWithLoader({
   loader: async ({ event, context }) => {
-    const poolAddress = getPoolAddressByBribeVotingRewardAddress(
+    const poolAddress = await getPoolAddressByBribeVotingRewardAddress(
       event.chainId,
       event.srcAddress,
     );
@@ -66,11 +66,11 @@ VotingReward.NotifyReward.handlerWithLoader({
 
       if (!storedToken) {
         try {
-          rewardToken = await getTokenPriceData(
-            event.params.reward,
-            event.block.number,
-            event.chainId,
-          );
+          rewardToken = await context.effect(getTokenPriceData, {
+            tokenAddress: event.params.reward,
+            blockNumber: event.block.number,
+            chainId: event.chainId,
+          });
         } catch (error) {
           context.log.error(
             `Error in voting reward notify reward event fetching token details for ${event.params.reward} on chain ${event.chainId}: ${error}`,
